@@ -404,9 +404,11 @@ NEXT_RULE:
             " base strings extracted in $elapsed seconds\n");
 }
 
-
-
 sub extract_set_pri {
+  # void...
+}
+
+sub extract_set_pri_updated {
   my ($self, $conf, $rules, $ruletype) = @_;
 
   my @good_bases;

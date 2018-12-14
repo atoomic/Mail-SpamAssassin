@@ -449,7 +449,7 @@ sub try_extraction {
 
   # only do it once
   $original_sub //= \&Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::extract_set_pri_original;
-  $updated_sub //= \&Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::extract_set_pri;
+  $updated_sub //= \&Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::extract_set_pri_updated;
 
   
   use Benchmark qw{cmpthese};
@@ -549,7 +549,6 @@ sub try_extraction_light {
 __END__
 
 Benchmark results (using Perl 5.28.0 on a CentOS 7 server)
-
 # Benchmark using RULES
 #
 #
@@ -558,9 +557,9 @@ Benchmark results (using Perl 5.28.0 on a CentOS 7 server)
 #   body FOODOTSTAR /fooBar.*BAZ/
 #   body FOODOTSTAR2 /fooBar(?:BAZ|blarg)/
 #
-           Rate  updated original
-updated  14.0/s       --     -17%
-original 16.8/s      20%       --
+          Rate original  updated
+original 130/s       --      -2%
+updated  133/s       2%       --
 ok 1 - Benchmark done
 # Benchmark using RULES
 #
@@ -570,26 +569,26 @@ ok 1 - Benchmark done
 #   body FOODOTSTAR /foobar.*BAZ/i
 #   body FOODOTSTAR2 /foobar(?:BAZ|blarg)/i
 #
-           Rate  updated original
-updated  7.68/s       --     -10%
-original 8.50/s      11%       --
+          Rate  updated original
+updated  122/s       --      -2%
+original 125/s       2%       --
 ok 2 - Benchmark done
 # Benchmark using RULES
 #
 #
 #   body FOO /(?:(?:bbbb)|dddd (?:eeee )?by|aaaa)/i
 #
-           Rate  updated original
-updated  20.2/s       --      -5%
-original 21.3/s       5%       --
+          Rate original  updated
+original 134/s       --     -12%
+updated  151/s      13%       --
 ok 3 - Benchmark done
 # Benchmark using RULES
 #
 #     body TEST5 /time to refinance|refinanc\w{1,3}\b.{0,16}\bnow\b/i
 #
-           Rate  updated original
-updated  16.3/s       --      -6%
-original 17.4/s       7%       --
+          Rate original  updated
+original 165/s       --      -7%
+updated  177/s       8%       --
 ok 4 - Benchmark done
 # Benchmark using RULES
 #
@@ -597,9 +596,9 @@ ok 4 - Benchmark done
 #     body TEST3 /foody? bar/
 #
 #
-           Rate  updated original
-updated  7.88/s       --     -11%
-original 8.90/s      13%       --
+          Rate  updated original
+updated  121/s       --      -3%
+original 125/s       3%       --
 ok 5 - Benchmark done
 # Benchmark using RULES
 #
@@ -608,9 +607,9 @@ ok 5 - Benchmark done
 #
 #   body __FRAUD_PTS /\b(?:ass?ass?inat(?:ed|ion)|murder(?:e?d)?|kill(?:ed|ing)\b[^.]{0,99}\b(?:war veterans|rebels?))\b/i
 #
-           Rate original  updated
-original 6.67/s       --      -3%
-updated  6.87/s       3%       --
+          Rate  updated original
+updated  129/s       --      -1%
+original 131/s       1%       --
 ok 6 - Benchmark done
 # Benchmark using RULES
 #
@@ -618,34 +617,34 @@ ok 6 - Benchmark done
 #   body VIRUS_WARNING345                /(This message contained attachments that have been blocked by Guinevere|This is an automatic message from the Guinevere Internet Antivirus Scanner)\./
 #   body VIRUS_WARNING345I                /(This message contained attachments that have been blocked by Guinevere|This is an automatic message from the Guinevere Internet Antivirus Scanner)\./i
 #
-           Rate original  updated
-original 6.74/s       --      -9%
-updated  7.45/s      10%       --
+          Rate original  updated
+original 127/s       --     -19%
+updated  156/s      23%       --
 ok 7 - Benchmark done
 # Benchmark using RULES
 #
 #
 #   body FOO /foobar\x{e2}\x{82}\x{ac}baz/
 #
-           Rate  updated original
-updated  11.5/s       --     -11%
-original 12.9/s      13%       --
+          Rate  updated original
+updated  151/s       --      -1%
+original 153/s       1%       --
 ok 8 - Benchmark done
 # Benchmark using RULES
 #
 #     body FOO /(?:Viagra|Valium|Xanax|Soma|Cialis){2}/i
 #
-           Rate original  updated
-original 11.0/s       --     -12%
-updated  12.5/s      14%       --
+          Rate original  updated
+original 130/s       --      -3%
+updated  134/s       3%       --
 ok 9 - Benchmark done
 # Benchmark using RULES
 #
 #     body FOO /\brecords (?:[a-z_,-]+ )+?(?:feature|(?:a|re)ward)/i
 #
-           Rate  updated original
-updated  11.2/s       --     -10%
-original 12.4/s      11%       --
+          Rate  updated original
+updated  108/s       --      -5%
+original 113/s       5%       --
 ok 10 - Benchmark done
 # Benchmark using RULES
 #
@@ -654,9 +653,9 @@ ok 10 - Benchmark done
 #     body TEST1A /fo(?:oish|o) bar/
 #
 #
-           Rate  updated original
-updated  3.80/s       --      -3%
-original 3.92/s       3%       --
+          Rate original  updated
+original 120/s       --     -11%
+updated  135/s      13%       --
 ok 11 - Benchmark done
 # Benchmark using RULES
 #
@@ -664,9 +663,9 @@ ok 11 - Benchmark done
 #     body TEST2 /foody* bar/
 #
 #
-           Rate  updated original
-updated  5.27/s       --      -5%
-original 5.56/s       5%       --
+          Rate original  updated
+original 117/s       --     -21%
+updated  148/s      27%       --
 ok 12 - Benchmark done
 # Benchmark using RULES
 #
@@ -684,9 +683,9 @@ ok 12 - Benchmark done
 #     body TEST7 /(?!credit)[ck\xc7\xe7@]\W?r\W?[e3\xc8\xc9\xca\xcb\xe8\xe9\xea\xeb\xa4]\W?[d\xd0]\W?[il|!1y?\xcc\xcd\xce\xcf\xec\xed\xee\xef]\W?t/i
 #
 #
-         s/iter original  updated
-original   1.10       --     -10%
-updated   0.991      11%       --
+          Rate original  updated
+original 141/s       --      -2%
+updated  144/s       2%       --
 ok 13 - Benchmark done
 # Benchmark using RULES
 #
@@ -699,15 +698,3 @@ ok 13 - Benchmark done
 #     body TEST1 /fo(?:oish|o)? b(a|b)r/
 #     body TEST2 /fo(?:oish|o) b(a|b)r/
 #
-           Rate original  updated
-original 2.38/s       --      -3%
-updated  2.45/s       3%       --
-ok 14 - Benchmark done
-# Benchmark using RULES
-#
-#     body TEST3 /toniospam/i
-#
-           Rate  updated original
-updated  9.57/s       --     -10%
-original 10.7/s      11%       --
-
