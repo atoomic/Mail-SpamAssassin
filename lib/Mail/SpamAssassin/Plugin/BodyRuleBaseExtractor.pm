@@ -40,6 +40,16 @@ use warnings;
 # use bytes;
 use re 'taint';
 
+# Not a constant hashref for 5.6 compat
+use constant SLOT_BASE => 0;
+use constant SLOT_NAME => 1;
+use constant SLOT_ORIG => 2;
+use constant SLOT_LEN_BASE => 3;
+use constant SLOT_BASE_INITIAL => 4;
+use constant SLOT_HAS_MULTIPLE => 5;
+
+use constant CLOBBER => '';
+
 our @ISA = qw(Mail::SpamAssassin::Plugin);
 
 use constant DEBUG_RE_PARSING => 0;     # noisy!
@@ -113,7 +123,7 @@ sub extract_set {
 
 ###########################################################################
 
-sub extract_set_pri {
+sub extract_set_pri_original {
   my ($self, $conf, $rules, $ruletype) = @_;
 
   my @good_bases;
@@ -122,7 +132,7 @@ sub extract_set_pri {
   my $no = 0;
   my $count = 0;
   my $start = time;
-  $self->{main} = $conf->{main};	# for use in extract_hints()
+  $self->{main} = $conf->{main};  # for use in extract_hints()
   $self->{show_progress} and info ("extracting from rules of type $ruletype");
   my $tflags = $conf->{tflags};
 
@@ -382,6 +392,298 @@ NEXT_RULE:
     }
     $conf->{base_string}->{$ruletype}->{$base} = join ' ', sort keys %u;
   }
+  $self->{show_progress} and $progress and $progress->final();
+
+  if ($cachefile) {
+    $self->write_cachefile ($cachefile, $cached);
+  }
+
+  my $elapsed = time - $start;
+  $self->{show_progress} and info ("$ruletype: ".
+            (scalar keys %{$conf->{base_string}->{$ruletype}}).
+            " base strings extracted in $elapsed seconds\n");
+}
+
+sub extract_set_pri {
+  # void...
+}
+
+sub extract_set_pri_updated {
+  my ($self, $conf, $rules, $ruletype) = @_;
+
+  my @good_bases;
+  my @failed;
+  my $yes = 0;
+  my $no = 0;
+  my $count = 0;
+  my $start = time;
+  $self->{main} = $conf->{main};	# for use in extract_hints()
+  $self->{show_progress} and info ("extracting from rules of type $ruletype");
+  my $tflags = $conf->{tflags};
+
+  # attempt to find good "base strings" (simplified regexp subsets) for each
+  # regexp.  We try looking at the regexp from both ends, since there
+  # may be a good long string of text at the end of the rule.
+
+  # require this many chars in a base string + delimiters for it to be viable
+  my $min_chars = 5;
+
+  my $progress;
+  $self->{show_progress} and $progress = Mail::SpamAssassin::Util::Progress->new({
+                total => (scalar keys %{$rules} || 1),
+                itemtype => 'rules',
+              });
+
+  my $cached = { };
+  my $cachefile;
+
+  if ($self->{main}->{bases_cache_dir}) {
+    $cachefile = $self->{main}->{bases_cache_dir}."/rules.$ruletype";
+    dbg("zoom: reading cache file $cachefile");
+    $cached = $self->read_cachefile($cachefile);
+  }
+
+NEXT_RULE:
+  foreach my $name (keys %{$rules}) {
+    $self->{show_progress} and $progress and $progress->update(++$count);
+
+    my $rule = $rules->{$name};
+    my $cachekey = join "#", $name, $rule;
+
+    my $cent = $cached->{rule_bases}->{$cachekey};
+    if (defined $cent) {
+      if (defined $cent->{g}) {
+        dbg("zoom: YES (cached) $rule $name");
+        foreach my $ent (@{$cent->{g}}) {
+          # note: we have to copy these, since otherwise later
+          # modifications corrupt the cached data
+          push @good_bases, {
+            base => $ent->{base}, orig => $ent->{orig}, name => $ent->{name}
+          };
+        }
+        $yes++;
+      }
+      else {
+        dbg("zoom: NO (cached) $rule $name");
+        push @failed, { orig => $rule };    # no need to cache this
+        $no++;
+      }
+      next NEXT_RULE;
+    }
+
+    # ignore ReplaceTags rules
+    my $is_a_replacetags_rule = $conf->{rules_to_replace}->{$name};
+    my ($minlen, $lossy, @bases);
+
+    if (!$is_a_replacetags_rule) {
+      eval {  # catch die()s
+        my ($qr, $mods) = $self->simplify_and_qr_regexp($rule);
+        ($lossy, @bases) = $self->extract_hints($rule, $qr, $mods);
+      # dbg("zoom: %s %s -> %s", $name, $rule, join(", ", @bases));
+        1;
+      } or do {
+        my $eval_stat = $@ ne '' ? $@ : "errno=$!";  chomp $eval_stat;
+        dbg("zoom: giving up on regexp: $eval_stat");
+      };
+
+      if ($lossy && ($tflags->{$name}||'') =~ /\bmultiple\b/) {
+        warn "\nzoom: rule $name will loop on SpamAssassin older than 3.3.2 ".
+             "running under Perl 5.12 or older, Bug 6558\n";
+      }
+
+      # if any of the extracted hints in a set are too short, the entire
+      # set is invalid; this is because each set of N hints represents just
+      # 1 regexp.
+      foreach my $str (@bases) {
+        my $len = length fixup_re($str); # bug 6143: count decoded characters
+        if ($len < $min_chars) { $minlen = undef; @bases = (); last; }
+        elsif (!defined($minlen) || $len < $minlen) { $minlen = $len; }
+      }
+    }
+
+    if ($is_a_replacetags_rule || !$minlen || !@bases) {
+      dbg("zoom: ignoring rule %s, %s", $name,
+          $is_a_replacetags_rule ? 'is a replace rule'
+          : !@bases ? 'no bases' : 'no minlen');
+      push @failed, { orig => $rule };
+      $cached->{rule_bases}->{$cachekey} = { };
+      $no++;
+    }
+    else {
+      # dbg("zoom: YES <base>$base</base> <origrule>$rule</origrule>");
+
+      # figure out if we have e.g. ["foo", "foob", "foobar"]; in this
+      # case, we only need to track ["foo"].
+      my %subsumed;
+      foreach my $base1 (@bases) {
+        foreach my $base2 (@bases) {
+          if ($base1 ne $base2 && $base1 =~ /\Q$base2\E/) {
+            $subsumed{$base1} = 1; # base2 is inside base1; discard the longer
+          }
+        }
+      }
+
+      my @forcache;
+      foreach my $base (@bases) {
+        next if $subsumed{$base};
+        push @good_bases, {
+            base => $base, orig => $rule, name => "$name,[l=$lossy]"
+          };
+        # *separate* copies for cache -- we modify the @good_bases entry
+        push @forcache, {
+            base => $base, orig => $rule, name => "$name,[l=$lossy]"
+          };
+      }
+
+      $cached->{rule_bases}->{$cachekey} = { g => \@forcache };
+      $yes++;
+    }
+  }
+
+  $self->{show_progress} and $progress and $progress->final();
+
+  dbg("zoom: $ruletype: found ".(scalar @good_bases).
+      " usable base strings in $yes rules, skipped $no rules");
+
+  # NOTE: re2c will attempt to provide the longest pattern that matched; e.g.
+  # ("food" =~ "foo" / "food") will return "food".  So therefore if a pattern
+  # subsumes other patterns, we need to return hits for all of them.  We also
+  # need to take care of the case where multiple regexps wind up sharing the
+  # same base.   
+  #
+  # Another gotcha, an exception to the subsumption rule; if one pattern isn't
+  # entirely subsumed (e.g. "food" =~ "foo" / "ood"), then they will be
+  # returned as two hits, correctly.  So we only have to be smart about the
+  # full-subsumption case; overlapping is taken care of for us, by re2c.
+  #
+  # TODO: there's a bug here.  Since the code in extract_hints() has been
+  # modified to support more complex regexps, we can no longer simply assume
+  # that if pattern A is not contained in pattern B, that means that pattern B
+  # doesn't subsume it.  Consider, for example, A="foo*bar" and
+  # B="morefobarry"; A is indeed subsumed by B, but we won't be able to test
+  # that without running the A RE match itself somehow against B.
+  # same issue remains with:
+  #
+  #   "foo?bar" / "fobar"
+  #   "fo(?:o|oo|)bar" / "fobar"
+  #   "fo(?:o|oo)?bar" / "fobar"
+  #   "fo(?:o*|baz)bar" / "fobar"
+  #   "(?:fo(?:o*|baz)bar|blargh)" / "fobar"
+  #
+  # it's worse with this:
+  #
+  #   "fo(?:o|oo|)bar" / "foo*bar"
+  #
+  # basically, this is impossible to compute without reimplementing most of
+  # re2c, and it appears the re2c developers don't plan to offer this:
+  # https://sourceforge.net/tracker/index.php?func=detail&aid=1540845&group_id=96864&atid=616203
+
+  $conf->{base_orig}->{$ruletype} = { };
+  $conf->{base_string}->{$ruletype} = { };
+
+  $count = 0;
+  $self->{show_progress} and $progress = Mail::SpamAssassin::Util::Progress->new({
+                total => (scalar @good_bases || 1),
+                itemtype => 'bases',
+              });
+
+  # this bit is annoyingly O(N^2).  Rewrite the data -- the @good_bases
+  # array -- into a more efficient format, using arrays and with a little
+  # bit of precomputation, to go (quite a bit) faster
+  my @rewritten;
+  foreach my $set1 (@good_bases) {
+    my $base = $set1->{base};
+    next if (!$base || !$set1->{name});
+    push @rewritten, [
+      $base,                # 0 - SLOT_BASE
+      $set1->{name},        # 1 - SLOT_NAME
+      $set1->{orig},        # 2 - SLOT_ORIG
+      length $base,         # 3 - SLOT_LEN_BASE
+      $base,                # 4 - SLOT_BASE_INITIAL
+      0                     # 5 - SLOT_HAS_MULTIPLE, has_multiple flag
+    ];
+  }
+
+  @good_bases = sort {
+    $b->[SLOT_LEN_BASE] <=> $a->[SLOT_LEN_BASE] ||
+    $a->[SLOT_BASE] cmp $b->[SLOT_BASE] ||
+    $a->[SLOT_NAME] cmp $b->[SLOT_NAME] ||
+    $a->[SLOT_ORIG] cmp $b->[SLOT_ORIG]
+  } @rewritten;
+
+
+  my $base_orig =  $conf->{base_orig}->{$ruletype};
+  my $next_base_position = 0;
+  for my $set1 (@good_bases) {
+    $next_base_position++;
+    $self->{show_progress} and $progress and $progress->update(++$count);
+    my $base1 = $set1->[SLOT_BASE] or next;  # got clobbered
+    my $name1 = $set1->[SLOT_NAME];
+    my $orig1 = $set1->[SLOT_ORIG];
+    my $len1 = $set1->[SLOT_LEN_BASE];
+    $base_orig->{$name1} = $orig1;
+
+    foreach my $set2 (@good_bases[$next_base_position .. $#good_bases]) { # order from smallest to largest
+      # clobber false and exact dups; this can happen if a regexp outputs the
+      # same base string multiple times
+      if (!$set2->[SLOT_BASE] ||
+		(
+		  $base1 eq $set2->[SLOT_BASE] &&
+		  $name1 eq $set2->[SLOT_NAME] &&
+		  $orig1 eq $set2->[SLOT_ORIG]
+		)
+	)
+      {
+        #dbg("clobbering: [base2][$set2->[SLOT_BASE]][name2][$set2->[SLOT_NAME]][orig][$set2->[SLOT_ORIG]]");
+        $set2->[SLOT_BASE] = CLOBBER;       # clobber
+        next;
+      }
+
+      # Cannot be a subset if it does not contain the other base string
+      next if index($base1,$set2->[SLOT_BASE_INITIAL]) == -1;
+
+      # skip if either already contains the other rule's name
+      # optimize: this can only happen if the base has more than
+      # one rule already attached, ie [5]
+      next if ($set2->[SLOT_HAS_MULTIPLE] && index($set2->[SLOT_NAME],$name1) > -1 && $set2->[SLOT_NAME] =~ /(?: |^)\Q$name1\E(?: |$)/);
+
+      # don't use $name1 here, since another base in the set2 loop
+      # may have added $name2 since we set that
+      next if ($set1->[SLOT_HAS_MULTIPLE] && index($set1->[SLOT_NAME],$set2->[SLOT_NAME]) > -1 && $set1->[SLOT_NAME] =~ /(?: |^)\Q$set2->[SLOT_NAME]\E(?: |$)/);
+
+      # $set2->[SLOT_BASE] is just a subset of base1
+      #dbg("zoom: subsuming '$set2->[SLOT_BASE]' ($set2->[SLOT_NAME]) into '$base1': [SLOT_BASE]=$set1->[SLOT_BASE] [SLOT_HAS_MULTIPLE]=$set1->[SLOT_HAS_MULTIPLE]");
+      $set1->[SLOT_NAME] .= " ".$set2->[SLOT_NAME];
+      $set1->[SLOT_HAS_MULTIPLE] = 1;
+    }
+  }
+
+  # we can still have duplicate cases; __FRAUD_PTS and __SARE_FRAUD_BADTHINGS
+  # both contain "killed" for example, pointing at different rules, which
+  # the above search hasn't found.  Collapse them here with a hash
+  my %bases;
+  foreach my $set (@good_bases) {
+    my $base = $set->[0];
+    next unless $base;
+
+    if (defined $bases{$base}) {
+      $bases{$base} .= " ".$set->[1];
+    } else {
+      $bases{$base} = $set->[1];
+    }
+  }
+  undef @good_bases;
+
+  my $base_string =  $conf->{base_string}->{$ruletype};
+  foreach my $base (keys %bases) {
+    # uniq the list, since there are probably dup rules listed
+    my %u;
+    for my $i (split ' ', $bases{$base}) {
+      next if exists $u{$i}; undef $u{$i}; 
+    }
+    $base_string->{$base} = join ' ', sort keys %u;
+  }
+
   $self->{show_progress} and $progress and $progress->final();
 
   if ($cachefile) {
