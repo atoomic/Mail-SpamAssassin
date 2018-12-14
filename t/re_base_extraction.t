@@ -441,7 +441,45 @@ try_extraction ('
 
 use Mail::SpamAssassin;
 
+my $original_sub;
+my $updated_sub;
+
 sub try_extraction {
+  my ($rules, $params, $output, $notoutput) = @_;
+
+  # only do it once
+  $original_sub //= \&Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::extract_set_pri_original;
+  $updated_sub //= \&Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::extract_set_pri;
+
+  
+  use Benchmark qw{cmpthese};
+
+  note "Benchmark using RULES\n", $rules;
+
+  cmpthese(
+    -5 => {
+        'original' => sub {
+          local *Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::set_pri_original = $original_sub;
+          try_extraction_light( $rules, $params, $output, $notoutput );
+
+          return;
+        },
+        'updated' => sub {
+          local *Mail::SpamAssassin::Plugin::BodyRuleBaseExtractor::set_pri_original = $updated_sub;
+          try_extraction_light( $rules, $params, $output, $notoutput );
+
+          return;
+        },
+
+    }
+  );
+
+  ok 1, 'Benchmark done';
+
+  return;
+}
+
+sub try_extraction_light {
   my ($rules, $params, $output, $notoutput) = @_;
 
   my $sa = Mail::SpamAssassin->new({
@@ -453,7 +491,7 @@ sub try_extraction {
     dont_copy_prefs     => 1,
     base_quiet          => 1,
   });
-  ok($sa);
+  #ok($sa);
 
   # remove all rules and plugins; we want just our stuff
   unlink(<log/test_rules_copy/*.pre>);
@@ -478,6 +516,10 @@ sub try_extraction {
   while (($k, $v) = each %{$params}) { $sa->{$k}=$v; }
 
   $sa->init();
+
+  # set_pri_original is called during init no need to go further
+  return;
+
   ok ($sa->lint_rules() == 0) or warn "lint failed: $rules";
 
   my $conf = $sa->{conf};
@@ -503,4 +545,169 @@ sub try_extraction {
   }
 }
 
+
+__END__
+
+Benchmark results (using Perl 5.28.0 on a CentOS 7 server)
+
+# Benchmark using RULES
+#
+#
+#   body FOO /fooBar/
+#   body FOOI /fooBar/i
+#   body FOODOTSTAR /fooBar.*BAZ/
+#   body FOODOTSTAR2 /fooBar(?:BAZ|blarg)/
+#
+           Rate  updated original
+updated  14.0/s       --     -17%
+original 16.8/s      20%       --
+ok 1 - Benchmark done
+# Benchmark using RULES
+#
+#
+#   body FOO /foobar/
+#   body FOOI /foobar/i
+#   body FOODOTSTAR /foobar.*BAZ/i
+#   body FOODOTSTAR2 /foobar(?:BAZ|blarg)/i
+#
+           Rate  updated original
+updated  7.68/s       --     -10%
+original 8.50/s      11%       --
+ok 2 - Benchmark done
+# Benchmark using RULES
+#
+#
+#   body FOO /(?:(?:bbbb)|dddd (?:eeee )?by|aaaa)/i
+#
+           Rate  updated original
+updated  20.2/s       --      -5%
+original 21.3/s       5%       --
+ok 3 - Benchmark done
+# Benchmark using RULES
+#
+#     body TEST5 /time to refinance|refinanc\w{1,3}\b.{0,16}\bnow\b/i
+#
+           Rate  updated original
+updated  16.3/s       --      -6%
+original 17.4/s       7%       --
+ok 4 - Benchmark done
+# Benchmark using RULES
+#
+#     body TEST2 /foody* bar/
+#     body TEST3 /foody? bar/
+#
+#
+           Rate  updated original
+updated  7.88/s       --     -11%
+original 8.90/s      13%       --
+ok 5 - Benchmark done
+# Benchmark using RULES
+#
+#
+#   body __SARE_FRAUD_BADTHINGS /(?:all funds will be returned|ass?ylum|assassinate|(?:auto|boat|car|plane|train).{1,7}(?:crash|accident|disaster|wreck)|before they both died|brutal acts|cancer|coup attempt|disease|due to the current|\bexile\b|\bfled|\bflee\b|have been frozen|impeach|\bkilled|land dispute|murder|over-invoice|political crisis|poisoned (?:to death )?by|relocate|since the demise|\bslay\b)/i
+#
+#   body __FRAUD_PTS /\b(?:ass?ass?inat(?:ed|ion)|murder(?:e?d)?|kill(?:ed|ing)\b[^.]{0,99}\b(?:war veterans|rebels?))\b/i
+#
+           Rate original  updated
+original 6.67/s       --      -3%
+updated  6.87/s       3%       --
+ok 6 - Benchmark done
+# Benchmark using RULES
+#
+#
+#   body VIRUS_WARNING345                /(This message contained attachments that have been blocked by Guinevere|This is an automatic message from the Guinevere Internet Antivirus Scanner)\./
+#   body VIRUS_WARNING345I                /(This message contained attachments that have been blocked by Guinevere|This is an automatic message from the Guinevere Internet Antivirus Scanner)\./i
+#
+           Rate original  updated
+original 6.74/s       --      -9%
+updated  7.45/s      10%       --
+ok 7 - Benchmark done
+# Benchmark using RULES
+#
+#
+#   body FOO /foobar\x{e2}\x{82}\x{ac}baz/
+#
+           Rate  updated original
+updated  11.5/s       --     -11%
+original 12.9/s      13%       --
+ok 8 - Benchmark done
+# Benchmark using RULES
+#
+#     body FOO /(?:Viagra|Valium|Xanax|Soma|Cialis){2}/i
+#
+           Rate original  updated
+original 11.0/s       --     -12%
+updated  12.5/s      14%       --
+ok 9 - Benchmark done
+# Benchmark using RULES
+#
+#     body FOO /\brecords (?:[a-z_,-]+ )+?(?:feature|(?:a|re)ward)/i
+#
+           Rate  updated original
+updated  11.2/s       --     -10%
+original 12.4/s      11%       --
+ok 10 - Benchmark done
+# Benchmark using RULES
+#
+#     body EXCUSE_REMOVE /to .{0,20}(?:mailings|offers)/i
+#     body TEST2 /foody* bar/
+#     body TEST1A /fo(?:oish|o) bar/
+#
+#
+           Rate  updated original
+updated  3.80/s       --      -3%
+original 3.92/s       3%       --
+ok 11 - Benchmark done
+# Benchmark using RULES
+#
+#     body EXCUSE_REMOVE /to .{0,20}(?:mail(ings|food)|o(ffer|blarg)s)/i
+#     body TEST2 /foody* bar/
+#
+#
+           Rate  updated original
+updated  5.27/s       --      -5%
+original 5.56/s       5%       --
+ok 12 - Benchmark done
+# Benchmark using RULES
+#
+#     body FOO /foo bar/
+#     body EXCUSE_REMOVE /to be removed from.{0,20}(?:mailings|offers)/i
+#     body KAM_STOCKTIP15 /(?:Nano Superlattice Technology|NSLT)/is
+#     body TEST1 /foo(?:ish)? bar/
+#     body TEST1A /fo(?:oish|o) bar/
+#     body TEST1B /fo(?:oish|o)? bar/
+#     body TEST2 /foody* bar/
+#     body TEST3 /foody? bar/
+#     body TEST4 /A(?i:ct) N(?i:ow)/
+#     body TEST5 /time to refinance|refinanc\w{1,3}\b.{0,16}\bnow\b/i
+#     body TEST6 /(?:Current|Target)(?: Price)?:\s+\$(?:O\.|\d\.O)/
+#     body TEST7 /(?!credit)[ck\xc7\xe7@]\W?r\W?[e3\xc8\xc9\xca\xcb\xe8\xe9\xea\xeb\xa4]\W?[d\xd0]\W?[il|!1y?\xcc\xcd\xce\xcf\xec\xed\xee\xef]\W?t/i
+#
+#
+         s/iter original  updated
+original   1.10       --     -10%
+updated   0.991      11%       --
+ok 13 - Benchmark done
+# Benchmark using RULES
+#
+#     body FOO /foo bar/
+#     body EXCUSE_REMOVE /to be removed from.{0,20}(?:mailings|offers)/i
+#     body KAM_STOCKTIP15 /(?:Nano Superlattice Technology|NSLT)/is
+#
+#     # this should not result in a match on "foo bar" since we are not
+#     # splitting alts in this test
+#     body TEST1 /fo(?:oish|o)? b(a|b)r/
+#     body TEST2 /fo(?:oish|o) b(a|b)r/
+#
+           Rate original  updated
+original 2.38/s       --      -3%
+updated  2.45/s       3%       --
+ok 14 - Benchmark done
+# Benchmark using RULES
+#
+#     body TEST3 /toniospam/i
+#
+           Rate  updated original
+updated  9.57/s       --     -10%
+original 10.7/s      11%       --
 
